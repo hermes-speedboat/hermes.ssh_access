@@ -2,6 +2,8 @@
 
 SSH access model for Hermes Agent on Linux VMs using a single `hermes` account with passwordless sudo and Hermes-side approval for non-read execution.
 
+For another Hermes instance that only needs the operational rules, start with [HERMES-HANDOFF.md](HERMES-HANDOFF.md).
+
 ## Goals
 
 Hermes should be able to administer Linux VMs over SSH without getting blocked by interactive prompts, while still preserving a clear operator workflow:
