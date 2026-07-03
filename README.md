@@ -150,31 +150,36 @@ Verify:
 ipa user-show hermes
 ```
 
-### 2. Allow sudo through HBAC
+### 2. Allow SSH and sudo through HBAC
 
-FreeIPA HBAC for sudo must allow the **Sudo service group**:
+FreeIPA HBAC must allow both:
+
+- the `sshd` HBAC service for SSH login;
+- the **Sudo service group** for sudo.
 
 ```bash
-ipa hbacrule-add "hermes-sudo"
-ipa hbacrule-add-user "hermes-sudo" --users=hermes
-ipa hbacrule-add-service "hermes-sudo" --hbacsvcgroups=Sudo
-ipa hbacrule-mod "hermes-sudo" --hostcat=all
+ipa hbacrule-add "hermes-access"
+ipa hbacrule-add-user "hermes-access" --users=hermes
+ipa hbacrule-add-service "hermes-access" --hbacsvcs=sshd
+ipa hbacrule-add-service "hermes-access" --hbacsvcgroups=Sudo
+ipa hbacrule-mod "hermes-access" --hostcat=all
 ```
 
-Do not use `--hbacsvcs=Sudo` for this rule. The service group form is required here.
+Do not use `--hbacsvcs=Sudo` for sudo. The sudo side must use the service group form: `--hbacsvcgroups=Sudo`.
 
 Verify:
 
 ```bash
-ipa hbacrule-show "hermes-sudo"
+ipa hbacrule-show "hermes-access"
 ```
 
 Expected essentials:
 
 ```text
-Rule name: hermes-sudo
+Rule name: hermes-access
 Host category: all
 Users: hermes
+HBAC Services: sshd
 HBAC Service Groups: Sudo
 ```
 
@@ -202,7 +207,7 @@ On the FreeIPA server or admin host:
 
 ```bash
 ipa sudorule-show "hermes-all"
-ipa hbacrule-show "hermes-sudo"
+ipa hbacrule-show "hermes-access"
 ipa user-show hermes
 ```
 
