@@ -124,8 +124,11 @@ for cmd in /usr/bin/journalctl /usr/bin/dmesg /usr/bin/ss /usr/sbin/ss /sbin/ip 
   ipa sudorule-add-allow-command "hermes-read" --sudocmds="$cmd"
 done
 
-# Enable NOPASSWD
+### Step 3: Enable NOPASSWD on read rule
+
+```bash
 ipa sudorule-add-option "hermes-read" --sudooption '!authenticate'
+```
 
 # Assign user
 ipa sudorule-add-user "hermes-read" --users hermes
@@ -358,64 +361,7 @@ sudo -l
 
 ---
 
-## Troubleshooting
-
-### SSH: "Bad owner or permissions on /etc/ssh/ssh_config.d/04-ipa.conf"
-
-**Cause:** The SSH client directory is owned by non-root user.
-
-**Fix:**
-```bash
-# On the host running SSH client (often the container)
-sudo chown -R root:root /etc/ssh/
-```
-
-### Sudo: "PAM account management error: Permission denied"
-
-**Cause:** The hermes user has no proper home directory.
-
-**Fix:**
-```bash
-mkdir -p /home/hermes
-chown hermes:hermes /home/hermes
-chmod 755 /home/hermes
-```
-
-### Sudo: "no such option: --sudooption"
-
-**Cause:** Older FreeIPA versions use different flag names.
-
-**Fix:**
-```bash
-# Check available options
-ipa sudorule-mod -h
-
-# Use the correct flag (likely --sudooption)
-ipa sudorule-add-option "hermes-read" --sudooption '!authenticate'
-```
-
-### HBAC: "did not receive Kerberos credentials"
-
-**Cause:** Need to authenticate to FreeIPA first.
-
-**Fix:**
-```bash
-kinit admin
-# Then run ipa commands
-```
-
-### Read tier works but write tier doesn't require password
-
-**Cause:** The command is in the read tier, not write tier.
-
-**Fix:** Use a command that's actually in the write tier:
-```bash
-# This works without password (read tier)
-sudo -n systemctl is-active sshd
-
-# This requires password (write tier)
-sudo -n systemctl restart sshd
-```
+## Verification
 
 ---
 
