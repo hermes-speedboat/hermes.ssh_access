@@ -52,6 +52,46 @@ Use **two Unix identities and two SSH keys**:
 
 This is the cleanest practical model because the identity itself becomes part of the security boundary. If Hermes is connected as `hermes-read`, admin commands are not available even if the agent approval layer is misconfigured. To make changes, Hermes must use the `hermes-admin` key and should only do that after explicit user confirmation.
 
+### Approval flow
+
+```mermaid
+flowchart TD
+    A[Hermes receives sysadmin task] --> B{Is the task read/debug only?}
+
+    B -- Yes --> C[Use hermes-read SSH key]
+    C --> D[Run read/debug sudo commands with sudo -n]
+    D --> E[Return evidence: logs, status, metrics, config]
+
+    B -- No, changes system state --> F[Require explicit user approval]
+    F --> G{Approved by user?}
+    G -- No --> H[Stop: do not use admin identity]
+    G -- Yes --> I[Use hermes-admin SSH key]
+    I --> J[Run allowlisted admin sudo command with sudo -n]
+    J --> K[Verify result and collect logs]
+    K --> L[Report what changed and show evidence]
+
+    D -. sudo boundary .-> M[(Target sudoers / FreeIPA rule)]
+    J -. sudo boundary .-> M
+    F -. approval boundary .-> N[(Hermes approval mode)]
+```
+
+Equivalent ASCII view:
+
+```text
+Task received
+     |
+     v
+Read/debug only? ---- yes ----> hermes-read key ----> read sudo allowlist ----> evidence
+     |
+     no
+     v
+User approval required ---- no ----> stop
+     |
+    yes
+     v
+hermes-admin key ----> admin sudo allowlist ----> verify change ----> report evidence
+```
+
 ### Architecture comparison
 
 #### A. One user: `hermes`
