@@ -5,88 +5,22 @@
   gather_facts: true
 
   vars:
-    hermes_read_user: hermes-read
-    hermes_admin_user: hermes-admin
-    hermes_read_comment: Hermes Agent read/debug identity
-    hermes_admin_comment: Hermes Agent admin/write identity
-    hermes_read_home: "/home/{{ hermes_read_user }}"
-    hermes_admin_home: "/home/{{ hermes_admin_user }}"
+    hermes_user: hermes
+    hermes_comment: Hermes Agent privileged SSH identity
+    hermes_home: "/home/{{ hermes_user }}"
     hermes_shell_default: /bin/sh
 
-    # Provide these via inventory, Ansible Vault, or -e.
-    hermes_read_ssh_public_key: ""
-    hermes_admin_ssh_public_key: ""
-
-    hermes_read_command_candidates:
-      - /bin/ls
-      - /usr/bin/ls
-      - /bin/cat
-      - /usr/bin/cat
-      - /bin/ps
-      - /usr/bin/ps
-      - /bin/df
-      - /usr/bin/df
-      - /usr/bin/du
-      - /usr/bin/find
-      - /usr/bin/grep
-      - /bin/grep
-      - /usr/bin/tail
-      - /usr/bin/top
-      - /usr/bin/uptime
-      - /usr/bin/free
-      - /usr/bin/ss
-      - /usr/sbin/ss
-      - /sbin/ip
-      - /usr/sbin/ip
-      - /usr/bin/journalctl
-      - /usr/bin/dmesg
-      - /usr/bin/lsof
-      - /usr/bin/nproc
-      - /usr/bin/w
-
-    hermes_admin_command_candidates:
-      - /usr/bin/systemctl
-      - /bin/systemctl
-      - /usr/sbin/service
-      - /sbin/service
-      - /sbin/rc-service
-      - /usr/bin/tee
-      - /usr/bin/install
-      - /bin/cp
-      - /usr/bin/cp
-      - /bin/mv
-      - /usr/bin/mv
-      - /bin/rm
-      - /usr/bin/rm
-      - /bin/chown
-      - /usr/bin/chown
-      - /bin/chmod
-      - /usr/bin/chmod
-      - /sbin/apk
-      - /usr/bin/apt
-      - /usr/bin/apt-get
-      - /usr/bin/dnf
-      - /usr/bin/yum
-      - /usr/bin/rpm
+    # Provide this via inventory, Ansible Vault, or -e.
+    hermes_ssh_public_key: ""
 
   pre_tasks:
-    - name: Validate read SSH public key was provided
+    - name: Validate Hermes SSH public key was provided
       ansible.builtin.assert:
         that:
-          - hermes_read_ssh_public_key | length > 0
-          - hermes_read_ssh_public_key is match('^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+) .+')
+          - hermes_ssh_public_key | length > 0
+          - hermes_ssh_public_key is match('^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+) .+')
         fail_msg: >-
-          Set hermes_read_ssh_public_key to the public key for the
-          hermes-read identity.
-
-    - name: Validate admin SSH public key was provided
-      ansible.builtin.assert:
-        that:
-          - hermes_admin_ssh_public_key | length > 0
-          - hermes_admin_ssh_public_key is match('^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+) .+')
-        fail_msg: >-
-          Set hermes_admin_ssh_public_key to the public key for the
-          hermes-admin identity.
+          Set hermes_ssh_public_key to the public key for the hermes identity.
 
     - name: Install sudo on Alpine
       ansible.builtin.apk:
@@ -110,120 +44,53 @@
       ansible.builtin.set_fact:
         hermes_login_shell: "{{ '/bin/bash' if hermes_bash_stat.stat.exists else hermes_shell_default }}"
 
-    - name: Create Hermes read user
+    - name: Create Hermes user
       ansible.builtin.user:
-        name: "{{ hermes_read_user }}"
-        comment: "{{ hermes_read_comment }}"
-        home: "{{ hermes_read_home }}"
+        name: "{{ hermes_user }}"
+        comment: "{{ hermes_comment }}"
+        home: "{{ hermes_home }}"
         shell: "{{ hermes_login_shell }}"
         create_home: true
         state: present
 
-    - name: Create Hermes admin user
-      ansible.builtin.user:
-        name: "{{ hermes_admin_user }}"
-        comment: "{{ hermes_admin_comment }}"
-        home: "{{ hermes_admin_home }}"
-        shell: "{{ hermes_login_shell }}"
-        create_home: true
-        state: present
-
-    - name: Ensure SSH directories exist
+    - name: Ensure Hermes SSH directory exists
       ansible.builtin.file:
-        path: "{{ item.home }}/.ssh"
+        path: "{{ hermes_home }}/.ssh"
         state: directory
-        owner: "{{ item.user }}"
-        group: "{{ item.user }}"
+        owner: "{{ hermes_user }}"
+        group: "{{ hermes_user }}"
         mode: "0700"
-      loop:
-        - user: "{{ hermes_read_user }}"
-          home: "{{ hermes_read_home }}"
-        - user: "{{ hermes_admin_user }}"
-          home: "{{ hermes_admin_home }}"
 
-    - name: Install read identity authorized_keys
+    - name: Install Hermes authorized_keys
       ansible.builtin.copy:
-        dest: "{{ hermes_read_home }}/.ssh/authorized_keys"
-        owner: "{{ hermes_read_user }}"
-        group: "{{ hermes_read_user }}"
+        dest: "{{ hermes_home }}/.ssh/authorized_keys"
+        owner: "{{ hermes_user }}"
+        group: "{{ hermes_user }}"
         mode: "0600"
-        content: "{{ hermes_read_ssh_public_key }}\n"
+        content: "{{ hermes_ssh_public_key }}\n"
 
-    - name: Install admin identity authorized_keys
+    - name: Deploy Hermes sudoers rule
       ansible.builtin.copy:
-        dest: "{{ hermes_admin_home }}/.ssh/authorized_keys"
-        owner: "{{ hermes_admin_user }}"
-        group: "{{ hermes_admin_user }}"
-        mode: "0600"
-        content: "{{ hermes_admin_ssh_public_key }}\n"
-
-    - name: Detect existing read command paths
-      ansible.builtin.stat:
-        path: "{{ item }}"
-      loop: "{{ hermes_read_command_candidates }}"
-      register: hermes_read_command_stats
-
-    - name: Detect existing admin command paths
-      ansible.builtin.stat:
-        path: "{{ item }}"
-      loop: "{{ hermes_admin_command_candidates }}"
-      register: hermes_admin_command_stats
-
-    - name: Build read command allowlist from existing paths
-      ansible.builtin.set_fact:
-        hermes_read_commands: >-
-          {{ hermes_read_command_stats.results
-             | selectattr('stat.exists')
-             | map(attribute='item')
-             | list
-             | unique
-             | sort }}
-
-    - name: Build admin command allowlist from existing paths
-      ansible.builtin.set_fact:
-        hermes_admin_commands: >-
-          {{ hermes_admin_command_stats.results
-             | selectattr('stat.exists')
-             | map(attribute='item')
-             | list
-             | unique
-             | sort }}
-
-    - name: Ensure read command allowlist is not empty
-      ansible.builtin.assert:
-        that:
-          - hermes_read_commands | length > 0
-        fail_msg: No read/debug command candidates exist on this host.
-
-    - name: Ensure admin command allowlist is not empty
-      ansible.builtin.assert:
-        that:
-          - hermes_admin_commands | length > 0
-        fail_msg: No admin/write command candidates exist on this host.
-
-    - name: Deploy read/debug sudoers rule
-      ansible.builtin.copy:
-        dest: /etc/sudoers.d/10-hermes-read
+        dest: /etc/sudoers.d/10-hermes
         owner: root
         group: root
         mode: "0440"
         validate: "visudo -cf %s"
         content: |
-          # Managed by Ansible: Hermes Agent read/debug identity.
-          # This tier intentionally excludes service restart, package, and file-write commands.
-          {{ hermes_read_user }} ALL=(root) NOPASSWD: {{ hermes_read_commands | join(', ') }}
+          # Managed by Ansible: Hermes Agent privileged SSH identity.
+          # The target grants full passwordless sudo.
+          # Non-read execution must be approved by Hermes before command submission.
+          {{ hermes_user }} ALL=(ALL) NOPASSWD: ALL
 
-    - name: Deploy admin/write sudoers rule
-      ansible.builtin.copy:
-        dest: /etc/sudoers.d/20-hermes-admin
-        owner: root
-        group: root
-        mode: "0440"
-        validate: "visudo -cf %s"
-        content: |
-          # Managed by Ansible: Hermes Agent admin/write identity.
-          # Remote sudo is passwordless; approval must happen before this identity is used.
-          {{ hermes_admin_user }} ALL=(root) NOPASSWD: {{ hermes_admin_commands | join(', ') }}
+    - name: Remove legacy split-identity read sudoers rule
+      ansible.builtin.file:
+        path: /etc/sudoers.d/10-hermes-read
+        state: absent
+
+    - name: Remove legacy split-identity admin sudoers rule
+      ansible.builtin.file:
+        path: /etc/sudoers.d/20-hermes-admin
+        state: absent
 
     - name: Verify sudoers syntax after deployment
       ansible.builtin.command: visudo -c

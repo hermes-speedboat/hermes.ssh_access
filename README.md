@@ -1,78 +1,109 @@
 # Hermes SSH Access Setup
 
-Secure SSH access for Hermes Agent on Linux VMs with a clean separation between unattended diagnostics and explicitly approved administration.
+SSH access model for Hermes Agent on Linux VMs using a single `hermes` account with passwordless sudo and Hermes-side approval for non-read execution.
 
 ## Goals
 
-Hermes needs two different operational modes when connecting to remote Linux systems over SSH:
+Hermes should be able to administer Linux VMs over SSH without getting blocked by interactive prompts, while still preserving a clear operator workflow:
 
-1. **Read/debug access with minimal friction**
+1. **Read/debug actions run directly**
    - Read logs.
    - Inspect service state.
-   - Inspect processes, ports, network routes, disk, memory, and mounts.
-   - Read relevant configuration files.
-   - Run without an interactive confirmation for routine diagnostics.
+   - Inspect processes, ports, routes, disk, memory, mounts, and configuration.
+   - Gather evidence quickly without manual confirmation.
 
-2. **Write/admin access only after user approval**
+2. **Non-read actions require user approval before execution**
    - Write files under privileged paths such as `/root` or `/etc`.
    - Restart, reload, enable, or disable services.
    - Install, remove, or update packages.
-   - Change system state.
+   - Change permissions, ownership, firewall state, storage state, or any other system state.
 
-Important constraint: **do not use an interactive remote `sudo` password prompt as the approval model.** Hermes cannot reliably operate a remote interactive `sudo` password prompt through tool-driven SSH sessions. The useful control points are:
+Important constraint: **do not use an interactive remote `sudo` password prompt as the approval model.** Hermes cannot reliably operate a remote interactive `sudo` password prompt through tool-driven SSH sessions. The practical model is:
 
-- SSH identity and host scoping.
-- sudo command scoping on the target host.
-- Hermes-side command approval before state-changing actions.
-- sudo, journald, auditd, and central log forwarding for accountability.
+- one SSH identity: `hermes`;
+- target-side sudo grants `hermes` full passwordless sudo;
+- Hermes approval mode decides whether a non-read command may be submitted;
+- SSH, sudo, journald, auditd, and central logs provide accountability.
 
 ## Threat Model / Trust Boundaries
 
-This setup assumes Hermes is a powerful operator tool, not a sandbox boundary. If Hermes is allowed to run a command as root with `NOPASSWD`, that command must be treated as available to the agent whenever that SSH identity is selected.
+This setup treats Hermes as a trusted automation operator. It is not a sandbox for an untrusted model.
 
-Trust boundaries:
+Because Hermes can use the configured SSH key on its own, separating `hermes-read` and `hermes-admin` identities is not a strong security boundary unless the Hermes runtime itself is prevented from accessing the admin key. If the same Hermes runtime can choose either key, two users mostly improve logging and attribution, not security.
 
-| Boundary | What it controls | What it does not control |
-|---|---|---|
-| SSH key | Which remote identity Hermes can use | What that identity can do after login |
-| sudo rule | Which root commands the identity can execute | Whether the command is safe for every argument |
-| Hermes approval | Whether a state-changing command is submitted by the agent | Target-side enforcement if Hermes is misconfigured or run in YOLO mode |
-| Logging | Accountability and investigation | Prevention |
+The chosen model is therefore intentionally simple:
 
-The original one-user model with `hermes-read` and `hermes-write` sudo rules is not a clean boundary when both rules apply to the same Unix account. A binary allowlist such as `/usr/bin/systemctl` cannot distinguish `systemctl status` from `systemctl restart` unless the sudo command entry also includes arguments. If `/usr/bin/systemctl` is in a `NOPASSWD` read rule, then `sudo systemctl restart ...` is also allowed through that same rule.
+| Boundary | Decision |
+|---|---|
+| Remote Unix identity | Single `hermes` user |
+| Remote sudo policy | `hermes ALL=(ALL) NOPASSWD: ALL` |
+| Approval boundary | Hermes must ask before non-read/system-changing execution |
+| Logging boundary | Host logs record SSH login and sudo commands by `hermes` |
+
+This means target-side sudo does **not** prevent Hermes from changing the system. The prevention point is Hermes approval behavior and operator discipline. If Hermes is run with approval bypass / YOLO mode, this model becomes effectively unattended passwordless root over SSH.
 
 ## Recommended Architecture
 
-Use **two Unix identities and two SSH keys**:
+Use one Unix account and one SSH key:
 
-| Identity | Purpose | SSH key | sudo model | Hermes approval |
-|---|---|---|---|---|
-| `hermes-read` | Routine diagnostics | read key | `NOPASSWD` for read-oriented commands only | Not required for normal diagnostics |
-| `hermes-admin` | State-changing operations | admin key | `NOPASSWD` for admin commands only | Required before using this identity or running admin commands |
+| Identity | Purpose | sudo model | Hermes approval |
+|---|---|---|---|
+| `hermes` | All diagnostics and approved administration | `NOPASSWD: ALL` | Required for non-read commands |
 
-This is the cleanest practical model because the identity itself becomes part of the security boundary. If Hermes is connected as `hermes-read`, admin commands are not available even if the agent approval layer is misconfigured. To make changes, Hermes must use the `hermes-admin` key and should only do that after explicit user confirmation.
+Recommended Hermes configuration:
+
+```bash
+hermes config set approvals.mode manual
+```
+
+`smart` can be evaluated later, but start with `manual` for sysadmin access. Do **not** use YOLO mode for production systems.
+
+### Read vs non-read rule
+
+A command is **read/debug** when it only observes system state and does not persistently change files, services, packages, users, firewall rules, kernel settings, mounts, or data.
+
+Examples that usually count as read/debug:
+
+```text
+journalctl, systemctl status, systemctl show, ss, ip addr, ip route,
+ps, top, free, df, du, cat, tail, grep, find without -delete/-exec,
+sudo -l, getent, id, ls, stat
+```
+
+Examples that are **non-read** and require approval:
+
+```text
+systemctl restart|reload|enable|disable|start|stop
+apt|apt-get|dnf|yum|apk|rpm package changes
+tee/cp/mv/rm/install/chmod/chown to privileged paths
+useradd/usermod/groupadd/passwd
+mount/umount
+firewall-cmd/iptables/nft/ufw changes
+sysctl -w or writes under /proc/sys
+any shell pipeline whose purpose is to modify state
+```
 
 ### Approval flow
 
 ```mermaid
 flowchart TD
-    A[Hermes receives sysadmin task] --> B{Is the task read/debug only?}
+    A[Hermes receives sysadmin task] --> B{Read/debug only?}
 
-    B -- Yes --> C[Use hermes-read SSH key]
-    C --> D[Run read/debug sudo commands with sudo -n]
+    B -- Yes --> C[Use SSH identity: hermes]
+    C --> D[Run command with sudo -n when needed]
     D --> E[Return evidence: logs, status, metrics, config]
 
-    B -- No, changes system state --> F[Require explicit user approval]
-    F --> G{Approved by user?}
-    G -- No --> H[Stop: do not use admin identity]
-    G -- Yes --> I[Use hermes-admin SSH key]
-    I --> J[Run allowlisted admin sudo command with sudo -n]
-    J --> K[Verify result and collect logs]
+    B -- No, changes state --> F[Ask user for approval]
+    F --> G{Approved?}
+    G -- No --> H[Stop: do not execute]
+    G -- Yes --> I[Use SSH identity: hermes]
+    I --> J[Run approved command with sudo -n]
+    J --> K[Verify the result]
     K --> L[Report what changed and show evidence]
 
-    D -. sudo boundary .-> M[(Target sudoers / FreeIPA rule)]
-    J -. sudo boundary .-> M
-    F -. approval boundary .-> N[(Hermes approval mode)]
+    D -. remote privilege .-> M[(sudoers: hermes NOPASSWD: ALL)]
+    J -. remote privilege .-> M
+    F -. approval boundary .-> N[(Hermes approvals.mode manual)]
 ```
 
 Equivalent ASCII view:
@@ -81,118 +112,42 @@ Equivalent ASCII view:
 Task received
      |
      v
-Read/debug only? ---- yes ----> hermes-read key ----> read sudo allowlist ----> evidence
+Read/debug only? ---- yes ----> hermes SSH ----> sudo -n if needed ----> evidence
      |
      no
      v
-User approval required ---- no ----> stop
+Ask user approval ---- no ----> stop
      |
     yes
      v
-hermes-admin key ----> admin sudo allowlist ----> verify change ----> report evidence
+hermes SSH ----> approved sudo command ----> verify change ----> report evidence
 ```
-
-### Architecture comparison
-
-#### A. One user: `hermes`
-
-Model:
-
-- One SSH key.
-- One Unix account.
-- sudo has a limited `NOPASSWD` allowlist.
-- Hermes approval controls whether write/admin commands are attempted.
-
-Pros:
-
-- Simple to deploy.
-- Simple to explain.
-- Works for low-risk lab systems.
-
-Cons:
-
-- Weak separation between read and write actions.
-- If the read sudo rule includes a multi-purpose binary such as `systemctl`, `mount`, `tee`, `cp`, `find`, or an editor, sudo cannot infer the operator's intent from the binary path alone.
-- If Hermes runs in YOLO mode or approval detection is wrong, the same account may already have the privileged command available.
-
-Recommendation: use only for disposable labs or fully trusted hosts where the operational risk is accepted.
-
-#### B. Two users / two SSH keys: `hermes-read` and `hermes-admin`
-
-Model:
-
-- Separate SSH keys.
-- Separate Unix accounts.
-- `hermes-read` gets only read/debug sudo commands.
-- `hermes-admin` gets admin/write sudo commands.
-- Switching to `hermes-admin` is the explicit approval boundary.
-
-Pros:
-
-- Stronger and easier to audit.
-- A read-only session cannot accidentally restart services or install packages.
-- Key rotation and host scoping can differ between read and admin access.
-- Works consistently for FreeIPA and standalone hosts.
-
-Cons:
-
-- More setup than a single account.
-- Hermes workflows must know which SSH identity to use.
-
-Recommendation: **default production architecture**.
-
-#### C. Argument-based sudo rules
-
-Model:
-
-- sudo command entries include command arguments, for example a command specification equivalent to `systemctl status *`.
-- Restart/reload/enable/disable are separate admin command entries.
-
-FreeIPA and sudo/SSSD can represent sudo command strings, and sudo itself supports command specifications with arguments. This can be useful for narrowing high-risk tools. However, argument matching is not a complete security model for Hermes sysadmin access:
-
-- It is easy to miss alternative read/write subcommands or aliases.
-- Shell quoting and wildcard matching must be reviewed carefully.
-- Some tools are inherently multi-purpose and hard to constrain safely by arguments.
-- A rule like `cat *` may be read-only but still exposes every readable secret as root.
-- A rule like `find *` can become dangerous if `-exec`, `-delete`, or writable paths are allowed.
-
-Recommendation: use argument-based sudo rules only as an additional hardening layer for specific well-understood commands. Do not rely on them as the main read/write separation for Hermes. Prefer two identities.
 
 ## FreeIPA Setup
 
 These examples use current FreeIPA CLI syntax and avoid an interactive sudo password model.
 
-### 1. Create users and SSH keys
+### 1. Create the `hermes` user and SSH key
 
 Run on a FreeIPA admin host with valid Kerberos credentials:
 
 ```bash
 kinit admin
 
-ipa user-add hermes-read \
+ipa user-add hermes \
   --first=Hermes \
-  --last=Read \
-  --email=hermes-read@example.com \
+  --last=Agent \
+  --email=hermes@example.com \
   --shell=/bin/bash
 
-ipa user-add hermes-admin \
-  --first=Hermes \
-  --last=Admin \
-  --email=hermes-admin@example.com \
-  --shell=/bin/bash
-
-ipa user-mod hermes-read \
-  --sshpubkey="ssh-ed25519 AAAA... hermes-read@example.com"
-
-ipa user-mod hermes-admin \
-  --sshpubkey="ssh-ed25519 AAAA... hermes-admin@example.com"
+ipa user-mod hermes \
+  --sshpubkey="ssh-ed25519 AAAA... hermes@example.com"
 ```
 
 Verify:
 
 ```bash
-ipa user-show hermes-read
-ipa user-show hermes-admin
+ipa user-show hermes
 ```
 
 ### 2. Allow sudo through HBAC
@@ -201,8 +156,7 @@ FreeIPA HBAC for sudo must allow the **Sudo service group**:
 
 ```bash
 ipa hbacrule-add "hermes-sudo"
-ipa hbacrule-add-user "hermes-sudo" --users=hermes-read
-ipa hbacrule-add-user "hermes-sudo" --users=hermes-admin
+ipa hbacrule-add-user "hermes-sudo" --users=hermes
 ipa hbacrule-add-service "hermes-sudo" --hbacsvcgroups=Sudo
 ipa hbacrule-mod "hermes-sudo" --hostcat=all
 ```
@@ -220,129 +174,53 @@ Expected essentials:
 ```text
 Rule name: hermes-sudo
 Host category: all
-Users: hermes-read, hermes-admin
+Users: hermes
 HBAC Service Groups: Sudo
 ```
 
-### 3. Create sudo command objects
+### 3. Create the full sudo rule
 
-Use command groups so the rules are easier to maintain.
-
-Read/debug commands should avoid tools that can directly change system state. Do **not** put plain `/usr/bin/systemctl`, `/usr/bin/mount`, `/usr/bin/umount`, package managers, editors, `tee`, `cp`, `mv`, or `install` in the read group.
+Use one sudo rule granting full passwordless sudo to `hermes`:
 
 ```bash
-ipa sudocmdgroup-add hermes-read-commands \
-  --desc="Read/debug commands for Hermes read identity"
+ipa sudorule-add "hermes-all" \
+  --desc="Full passwordless sudo for Hermes Agent; non-read commands require Hermes approval" \
+  --hostcat=all \
+  --runasusercat=all \
+  --runasgroupcat=all \
+  --cmdcat=all
 
-for cmd in \
-  /usr/bin/journalctl \
-  /usr/bin/dmesg \
-  /usr/bin/ss \
-  /usr/sbin/ss \
-  /sbin/ip \
-  /usr/sbin/ip \
-  /usr/bin/free \
-  /usr/bin/df \
-  /usr/bin/du \
-  /usr/bin/lsof \
-  /usr/bin/tail \
-  /usr/bin/cat \
-  /bin/ls \
-  /usr/bin/find \
-  /usr/bin/grep \
-  /usr/bin/nproc \
-  /usr/bin/ps \
-  /usr/bin/w \
-  /usr/bin/uptime; do
-  ipa sudocmd-add "$cmd" || true
-  ipa sudocmdgroup-add-member hermes-read-commands --sudocmds="$cmd"
-done
-
-ipa sudocmdgroup-add hermes-admin-commands \
-  --desc="Admin/write commands for Hermes admin identity"
-
-for cmd in \
-  /usr/bin/systemctl \
-  /usr/bin/tee \
-  /usr/bin/install \
-  /usr/bin/cp \
-  /usr/bin/mv \
-  /usr/bin/rm \
-  /usr/bin/chown \
-  /usr/bin/chmod \
-  /usr/bin/dnf \
-  /usr/bin/yum \
-  /usr/bin/apt \
-  /usr/bin/apt-get \
-  /sbin/apk \
-  /usr/sbin/service \
-  /sbin/rc-service; do
-  ipa sudocmd-add "$cmd" || true
-  ipa sudocmdgroup-add-member hermes-admin-commands --sudocmds="$cmd"
-done
-```
-
-If you want argument-based hardening for a specific command, create a separate command object and test it on an enrolled host with `sudo -l -U <user>` and real executions. Treat this as defense-in-depth, not as the primary model.
-
-### 4. Create the read sudo rule
-
-```bash
-ipa sudorule-add "hermes-read" \
-  --desc="Read/debug sudo for Hermes read identity" \
-  --hostcat=all
-
-ipa sudorule-add-user "hermes-read" --users=hermes-read
-ipa sudorule-add-allow-command "hermes-read" --sudocmdgroups=hermes-read-commands
-ipa sudorule-add-option "hermes-read" --sudooption='!authenticate'
+ipa sudorule-add-user "hermes-all" --users=hermes
+ipa sudorule-add-option "hermes-all" --sudooption='!authenticate'
 ```
 
 `!authenticate` is the FreeIPA sudo option form for `NOPASSWD`.
 
-### 5. Create the admin sudo rule
-
-This rule is also `NOPASSWD`, because Hermes must not depend on a remote interactive sudo password prompt. Approval happens before Hermes uses the admin SSH identity or submits state-changing commands.
-
-```bash
-ipa sudorule-add "hermes-admin" \
-  --desc="Admin/write sudo for Hermes admin identity" \
-  --hostcat=all
-
-ipa sudorule-add-user "hermes-admin" --users=hermes-admin
-ipa sudorule-add-allow-command "hermes-admin" --sudocmdgroups=hermes-admin-commands
-ipa sudorule-add-option "hermes-admin" --sudooption='!authenticate'
-```
-
-### 6. Verify FreeIPA rules
+### 4. Verify FreeIPA rules
 
 On the FreeIPA server or admin host:
 
 ```bash
-ipa sudorule-show "hermes-read"
-ipa sudorule-show "hermes-admin"
-ipa sudocmdgroup-show hermes-read-commands
-ipa sudocmdgroup-show hermes-admin-commands
+ipa sudorule-show "hermes-all"
 ipa hbacrule-show "hermes-sudo"
+ipa user-show hermes
 ```
 
 On each enrolled target host:
 
 ```bash
-getent passwd hermes-read
-getent passwd hermes-admin
-id hermes-read
-id hermes-admin
+getent passwd hermes
+id hermes
 sudo sss_cache -E
 sudo systemctl restart sssd
-sudo -l -U hermes-read
-sudo -l -U hermes-admin
+sudo -l -U hermes
 ```
 
-Expected:
+Expected sudo listing should include unrestricted passwordless sudo for `hermes`, equivalent to:
 
-- `hermes-read` can list and run only read/debug commands.
-- `hermes-admin` can list and run admin/write commands.
-- Both rules show `NOPASSWD` / `!authenticate`.
-- sudo access works through HBAC with the `Sudo` service group.
+```text
+(root) NOPASSWD: ALL
+```
 
 ## Standalone Host Setup with Ansible
 
@@ -354,13 +232,13 @@ ansible/deploy-hermes-ssh-access.yml
 
 The playbook:
 
-- Creates `hermes-read` and `hermes-admin` users.
-- Installs separate SSH public keys.
-- Installs `sudo` where required.
-- Detects command paths that actually exist on the target.
-- Writes sudoers drop-ins under `/etc/sudoers.d/`.
-- Validates each sudoers file with `visudo -cf %s` before installation.
-- Handles Alpine, Debian/Ubuntu, and RHEL-family package installation.
+- creates the local `hermes` user;
+- installs the configured SSH public key;
+- installs `sudo` where required;
+- writes `/etc/sudoers.d/10-hermes`;
+- grants `hermes ALL=(ALL) NOPASSWD: ALL`;
+- validates the sudoers file with `visudo -cf %s` before installation;
+- handles Alpine, Debian/Ubuntu, and RHEL-family package installation.
 
 Example run:
 
@@ -368,76 +246,77 @@ Example run:
 ansible-playbook \
   -i inventory.ini \
   ansible/deploy-hermes-ssh-access.yml \
-  -e hermes_read_ssh_public_key='ssh-ed25519 AAAA... hermes-read@example.com' \
-  -e hermes_admin_ssh_public_key='ssh-ed25519 AAAA... hermes-admin@example.com'
+  -e hermes_ssh_public_key='ssh-ed25519 AAAA... hermes@example.com'
 ```
 
 For production, prefer Ansible Vault, inventory variables, or a secure controller-side variable source for keys instead of long command-line variables.
 
 ## Verification
 
-### SSH identity checks
+### SSH access
 
 ```bash
-ssh -i ./hermes-read.key hermes-read@host.example.com 'whoami; id; hostname -f'
-ssh -i ./hermes-admin.key hermes-admin@host.example.com 'whoami; id; hostname -f'
+ssh -i ./hermes.key hermes@host.example.com 'whoami; id; hostname -f'
 ```
 
-### Read/debug checks
+### sudo access
 
-These should work without a password when using the read identity:
+These should work without a remote password:
 
 ```bash
-ssh -i ./hermes-read.key hermes-read@host.example.com 'sudo -n journalctl --no-pager -n 3'
-ssh -i ./hermes-read.key hermes-read@host.example.com 'sudo -n ss -tlnp'
-ssh -i ./hermes-read.key hermes-read@host.example.com 'sudo -n df -h'
+ssh -i ./hermes.key hermes@host.example.com 'sudo -n whoami'
+ssh -i ./hermes.key hermes@host.example.com 'sudo -n -l'
+ssh -i ./hermes.key hermes@host.example.com 'sudo -n journalctl --no-pager -n 3'
 ```
 
-These should fail for the read identity:
+Expected:
+
+```text
+root
+```
+
+and `sudo -l` should show passwordless `ALL` for `hermes`.
+
+### Read/debug example
+
+No approval should be needed for read-only inspection:
 
 ```bash
-ssh -i ./hermes-read.key hermes-read@host.example.com 'sudo -n systemctl restart sshd'
-ssh -i ./hermes-read.key hermes-read@host.example.com 'echo test | sudo -n tee /root/hermes-test.txt'
+ssh -i ./hermes.key hermes@host.example.com 'sudo -n systemctl status sshd --no-pager'
+ssh -i ./hermes.key hermes@host.example.com 'sudo -n ss -tlnp'
+ssh -i ./hermes.key hermes@host.example.com 'sudo -n df -h'
 ```
 
-### Admin/write checks
+### Non-read example
 
-Use the admin identity only after explicit approval:
+Hermes should ask for approval before submitting commands like this:
 
 ```bash
-ssh -i ./hermes-admin.key hermes-admin@host.example.com 'echo test | sudo -n tee /root/hermes-test.txt'
-ssh -i ./hermes-admin.key hermes-admin@host.example.com 'sudo -n cat /root/hermes-test.txt'
-ssh -i ./hermes-admin.key hermes-admin@host.example.com 'sudo -n rm -f /root/hermes-test.txt'
+ssh -i ./hermes.key hermes@host.example.com 'echo test | sudo -n tee /root/hermes-test.txt'
+ssh -i ./hermes.key hermes@host.example.com 'sudo -n rm -f /root/hermes-test.txt'
 ```
 
-### Sudo listing checks
+After approval and execution, verify the result and collect evidence from logs:
 
 ```bash
-ssh -i ./hermes-read.key hermes-read@host.example.com 'sudo -n -l'
-ssh -i ./hermes-admin.key hermes-admin@host.example.com 'sudo -n -l'
+ssh -i ./hermes.key hermes@host.example.com 'sudo -n journalctl _COMM=sudo --no-pager -n 20'
 ```
-
-Confirm that:
-
-- `hermes-read` does not list admin/write commands.
-- `hermes-admin` lists only the intended admin commands.
-- Neither identity has unrestricted `ALL` unless the host is an explicitly trusted lab system.
 
 ## Operational Guidance
 
-- Keep Hermes approval mode enabled for sysadmin work. Do not use YOLO mode for production access.
-- Treat the SSH identity as part of the approval boundary: read key for diagnostics, admin key only for approved changes.
-- Scope SSH keys and FreeIPA rules by host groups where possible instead of using `--hostcat=all` permanently.
-- Prefer short-lived or rotated admin keys for sensitive environments.
-- Keep sudo command lists small and review them as operational needs change.
-- Avoid adding broad interpreters or shells such as `/bin/bash`, `/bin/sh`, `python`, `perl`, or `env` to sudo allowlists. They collapse the command boundary into unrestricted root execution.
+- Keep Hermes approval mode enabled for sysadmin work: `hermes config set approvals.mode manual`.
+- Do not use YOLO mode for production systems with this SSH key.
+- Treat the `hermes` SSH key as privileged. It is effectively passwordless root on every target where this setup is installed.
+- Scope FreeIPA rules and SSH deployment by host groups where possible instead of using `--hostcat=all` permanently.
+- Rotate the `hermes` SSH key according to your privileged-access policy.
+- Prefer explicit commands and verification: inspect first, ask for approval for non-read changes, execute, then prove the result.
 - Log centrally. At minimum, collect SSH authentication logs and sudo logs. For stronger accountability, forward journald/auditd events to the central logging platform.
-- Document which Hermes profile or runtime is allowed to use the admin key.
+- Document which Hermes profile or runtime is allowed to hold and use the `hermes` private key.
 
 ## Limitations
 
-- This is not a sandbox for an untrusted model. It is an operational access model for a trusted automation agent with auditability and approval controls.
+- This model is not a target-side security boundary. The target grants `hermes` full passwordless sudo.
+- The approval boundary exists in Hermes. If Hermes approval is bypassed or misconfigured, the remote host will not stop state-changing commands.
 - `NOPASSWD` is intentional. The alternative, an interactive sudo password prompt, is not reliable for Hermes SSH automation.
-- Argument-based sudo rules can reduce risk for specific commands, but they are brittle and must be tested carefully. They are not a replacement for separate read/admin identities.
-- Root-level read access can expose secrets. Even the read identity should be granted only to hosts and files appropriate for Hermes diagnostics.
-- A compromised Hermes runtime with access to the admin key can perform admin actions allowed by sudo. Protect the admin key and keep it out of default read-only workflows.
+- A compromised Hermes runtime or leaked `hermes` private key can perform root actions on allowed hosts.
+- Separate Unix users can still be useful for logging, attribution, or key lifecycle management, but they are not a security gain if the same Hermes runtime can access all keys.
