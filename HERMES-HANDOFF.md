@@ -148,6 +148,37 @@ sudo systemctl restart sssd
 sudo -l -U hermes
 ```
 
+## Hermes Runtime SSH Client Wrapper on FreeIPA Systems
+
+This repository includes a Hermes skill for a local OpenSSH client problem that can affect Hermes instances running **on FreeIPA-joined systems**:
+
+```text
+skills/devops/hermes-ssh-namespace-wrapper/
+```
+
+Use it only if `/etc/ssh/ssh_config.d/04-ipa.conf` exists and OpenSSH fails inside Hermes with:
+
+```text
+Bad owner or permissions on /etc/ssh/ssh_config.d/04-ipa.conf
+```
+
+Typical diagnosis inside the Hermes context:
+
+```bash
+stat -c '%n %A %a %u:%g %U:%G' /etc/ssh/ssh_config.d/04-ipa.conf
+cat /proc/self/uid_map
+/usr/bin/ssh -G HOSTNAME
+```
+
+If `04-ipa.conf` appears as `nobody:nobody` inside Hermes but `root:root` on the host, install the skill into the active Hermes profile and run:
+
+```bash
+~/.hermes/skills/devops/hermes-ssh-namespace-wrapper/scripts/install-hermes-ssh-wrapper.sh --diagnose
+~/.hermes/skills/devops/hermes-ssh-namespace-wrapper/scripts/install-hermes-ssh-wrapper.sh --install
+```
+
+If `/etc/ssh/ssh_config.d/04-ipa.conf` is absent, this FreeIPA-specific wrapper is normally not needed.
+
 ## FreeIPA Requirements
 
 The `hermes` user must have HBAC access for both SSH and sudo.

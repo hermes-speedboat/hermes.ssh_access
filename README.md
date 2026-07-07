@@ -4,6 +4,14 @@ SSH access model for Hermes Agent on Linux VMs using a single `hermes` account w
 
 For another Hermes instance that only needs the operational rules, start with [HERMES-HANDOFF.md](HERMES-HANDOFF.md).
 
+This repository also contains a Hermes skill for the **local SSH client side** of FreeIPA-joined Hermes instances:
+
+```text
+skills/devops/hermes-ssh-namespace-wrapper/
+```
+
+Use that skill only when the Hermes runtime itself runs on a FreeIPA-joined Linux system and OpenSSH fails locally because `/etc/ssh/ssh_config.d/04-ipa.conf` appears as `nobody:nobody` inside the Hermes execution context.
+
 ## Goals
 
 Hermes should be able to administer Linux VMs over SSH without getting blocked by interactive prompts, while still preserving a clear operator workflow:
@@ -283,6 +291,44 @@ root
 ```
 
 and `sudo -l` should show passwordless `ALL` for `hermes`.
+
+## Hermes Runtime on FreeIPA-Joined Systems
+
+FreeIPA-enrolled systems normally install an OpenSSH client drop-in:
+
+```text
+/etc/ssh/ssh_config.d/04-ipa.conf
+```
+
+When Hermes itself runs as a systemd user service with namespace sandboxing, root-owned host files may appear as `nobody:nobody` inside the Hermes tool context. OpenSSH can then fail before any remote connection is attempted:
+
+```text
+Bad owner or permissions on /etc/ssh/ssh_config.d/04-ipa.conf
+```
+
+If the host/root shell shows the file as `root:root` but the Hermes context shows it as `nobody:nobody`, install the bundled Hermes skill:
+
+```bash
+# from this repository clone
+mkdir -p ~/.hermes/skills/devops
+cp -a skills/devops/hermes-ssh-namespace-wrapper ~/.hermes/skills/devops/
+
+~/.hermes/skills/devops/hermes-ssh-namespace-wrapper/scripts/install-hermes-ssh-wrapper.sh --diagnose
+~/.hermes/skills/devops/hermes-ssh-namespace-wrapper/scripts/install-hermes-ssh-wrapper.sh --install
+```
+
+For a named Hermes profile:
+
+```bash
+profile=<profile>
+mkdir -p ~/.hermes/profiles/$profile/skills/devops
+cp -a skills/devops/hermes-ssh-namespace-wrapper ~/.hermes/profiles/$profile/skills/devops/
+
+~/.hermes/profiles/$profile/skills/devops/hermes-ssh-namespace-wrapper/scripts/install-hermes-ssh-wrapper.sh --diagnose
+~/.hermes/profiles/$profile/skills/devops/hermes-ssh-namespace-wrapper/scripts/install-hermes-ssh-wrapper.sh --install
+```
+
+Do not install this wrapper on non-FreeIPA systems by default. If `/etc/ssh/ssh_config.d/04-ipa.conf` is absent, diagnose the local SSH error separately.
 
 ### Read/debug example
 
